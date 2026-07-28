@@ -31,14 +31,42 @@ testing (Phases 4–6) without confirmation.
 
 ---
 
+## Autonomous Mode (default)
+
+This skill runs as a **self-driving, multi-agent** engagement — the equivalent of
+an autonomous pentest agent (Strix-style), but entirely inside Claude Code on the
+user's subscription. **→ Load `references/autonomous-orchestration.md` before Phase 2.**
+
+- **Fully hands-off after authorization.** Once Phase 1 passes, self-advance through
+  Phases 2→7 without stopping to check in between phases or before exploitation.
+- **Two hard boundaries stay ON** (they are automated gates, not human checkpoints):
+  1. **Authorization gate** (Phase 1) — the one human confirmation.
+  2. **Scope-guard** — load authorized scope into `pentest/scope.txt`; before every
+     active request verify the host is in scope; auto-refuse + log + skip anything
+     out of scope. Never ask permission to go out of scope.
+- **Multi-agent fan-out:** after Phase 3, dispatch **3–4 concurrent subagents** (one
+  per top-ranked target) running Phases 4–6 in parallel; merge results; refill the
+  pool as agents finish. Relay each worker's findings when summarizing.
+- **Validate-before-report gate (Phase 6b):** nothing reaches the report without a
+  live, reproducible PoC — worker-verified, then orchestrator re-verified.
+- **State:** maintain `pentest/run-state.json` (schema in the reference) so a run is
+  resumable if interrupted.
+- **Handoff:** confirmed findings flow into `office_report` → `vajra_report`; each
+  PoC is the replayable step `office_recheck` needs for retests.
+
+Run exploit code on the Kali box (`shared_kali`), not the local host, for isolation.
+
+---
+
 ## Execution Order
 
 1. **[Phase 1]** Authorization gate
 2. **[Phase 2]** Passive recon
 3. **[Phase 3]** Target prioritization
-4. **[Phase 4]** Active scanning
-5. **[Phase 5]** Exploitation
+4. **[Phase 4]** Active scanning  ── *fanned out across 3–4 subagents in Autonomous Mode*
+5. **[Phase 5]** Exploitation      ── *(per-target, inside each subagent)*
 6. **[Phase 6]** Dynamic verification
+6b. **[Phase 6b]** Validation gate ── *orchestrator re-verifies every PoC*
 7. **[Phase 7]** Report generation
 
 ---
@@ -239,6 +267,7 @@ Status legend:
 | `references/verification-checklist.md` | Phase 6 — per-finding true/false positive tests |
 | `references/report-templates.md` | Phase 7 — report structure, severity table |
 | `references/dynamic-testing.md` | Phases D1–D8 — parallel tool execution, automated triage |
+| `references/autonomous-orchestration.md` | Autonomous Mode — self-driving loop, 3–4 agent fan-out, validation gate, run-state schema, subagent template |
 
 ## Playbooks
 
