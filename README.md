@@ -25,9 +25,22 @@ security assessment for target.com
 
 Claude will load the skill and begin with the **authorization gate** — you must confirm written authorization before any active testing starts.
 
+## Autonomous Mode
+
+`pt_brahmastra` runs as a **self-driving, multi-agent** engagement — the behavior of an autonomous pentest agent, but entirely inside Claude Code on your own subscription (no external tool, no separate API key).
+
+- **Fully hands-off after authorization** — once the auth gate passes, it self-advances through recon → fan-out → validation → report without stopping between phases.
+- **Multi-agent fan-out** — after prioritization it dispatches **3–4 concurrent subagents**, one per top-ranked target, running scanning + exploitation + verification in parallel, then merges results and refills the pool.
+- **Two hard boundaries stay on** (automated, not check-ins): the **authorization gate** and an automated **scope-guard** that skips + logs anything out of scope.
+- **Prove-every-bug gate (Phase 6b)** — nothing reaches the report without a live, reproducible PoC, verified by the worker *and* re-verified by the orchestrator.
+- **Resumable** — run state is tracked in `pentest/run-state.json`.
+- **Deliverable handoff** — confirmed findings flow into the report pipeline; each PoC is a replayable step for later retests.
+
+See `references/autonomous-orchestration.md` for the full loop spec, run-state schema, and subagent dispatch template.
+
 ## What It Does
 
-7-phase kill-chain:
+7-phase kill-chain (Autonomous Mode fans Phases 4–6 across subagents and adds a validation gate):
 
 | Phase | Name | Description |
 |---|---|---|
@@ -37,6 +50,7 @@ Claude will load the skill and begin with the **authorization gate** — you mus
 | 4 | Active scanning | Directory brute-force, CVE scan (nuclei), nikto, nmap |
 | 5 | Exploitation | 40+ attack classes — SQLi, XSS, auth, IDOR, SSTI, JWT, race conditions, etc. |
 | 6 | Dynamic verification | Live proof for every finding; false-positive triage |
+| 6b | Validation gate | Orchestrator re-verifies every PoC before it can enter the report |
 | 7 | Report generation | Structured report with severity ratings and evidence |
 
 ## Attack Classes Covered
@@ -62,6 +76,7 @@ references/
   level2-exploitation.md          ← all attack classes with commands
   verification-checklist.md       ← per-finding true/false positive tests
   dynamic-testing.md              ← D1–D8 parallel automated tool phases
+  autonomous-orchestration.md     ← self-driving loop, agent fan-out, validation gate
   report-templates.md             ← report structure and severity table
 playbooks/
   injection-fuzzer.py             ← 13-payload × N-field fuzzer with anomaly detection
