@@ -14,14 +14,14 @@ grep 'SUCCESS' httpx.txt                        # live hosts
 grep -i 'MODX\|WordPress\|Drupal\|Shopify' httpx.txt  # CMS targets
 grep -i 'SAP\|Hybris\|Commerce' httpx.txt        # SAP targets
 grep -v 'Cloudflare\|Akamai' httpx.txt           # non-CDN (testable)
-grep -oP '\[\d+\.\d+\.\d+\.\d+\]' httpx.txt | tr -d '[]' | sort -u  # IPs
+grep -oE '\[[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\]' httpx.txt | tr -d '[]' | sort -u  # IPs
 ```
 
 ## Subdomain Enumeration
 
 ```bash
 subfinder -d target.com -o subs_passive.txt
-amass enum -passive -d target.com -o subs_amass.txt
+amass enum -d target.com -o subs_amass.txt   # -passive flag deprecated; passive is the default now
 cat subs_passive.txt subs_amass.txt | sort -u > subs_all.txt
 
 # CT logs
@@ -37,7 +37,7 @@ dnsx -l subs_all.txt -a -o resolved.txt
 ```bash
 gau --subs target.com 2>/dev/null | tee urls_gau.txt
 waybackurls target.com 2>/dev/null | tee urls_wayback.txt
-cat urls_gau.txt urls_wayback.txt | sort -u | grep -v '\.(png|jpg|css|gif|woff)' > urls_interesting.txt
+cat urls_gau.txt urls_wayback.txt | sort -u | grep -vE '\.(png|jpg|css|gif|woff)' > urls_interesting.txt
 
 # Find JS files, API endpoints, params
 grep '\.js$\|\.json$' urls_interesting.txt
@@ -91,8 +91,8 @@ shodan host $(dig +short A target.com | head -1)
 /sitemap.xml
 /.well-known/security.txt
 /humans.txt
-/crossdomain.xml
-/clientaccesspolicy.xml
+/crossdomain.xml          # legacy (Flash/Silverlight era) — low signal, note only
+/clientaccesspolicy.xml   # legacy (Silverlight) — low signal, note only
 /CHANGELOG.txt
 /VERSION
 /package.json
@@ -147,9 +147,6 @@ site:target.com intitle:"index of"
 # Login pages across subdomains
 site:*.target.com inurl:login
 site:*.target.com inurl:admin
-
-# Cached / old versions
-cache:target.com
 ```
 
 ---
@@ -230,7 +227,6 @@ curl -sk "https://haveibeenpwned.com/api/v3/breachedaccount/TARGET@target.com" \
 # https://dehashed.com        — email/password combos
 # https://intelx.io           — pastebins, darkweb, breaches
 # https://leakcheck.io        — email/domain breach lookup
-# https://pwndb2am4tzkvold.onion — Tor-accessible breach DB
 
 # Credential stuffing prep — filter leaked creds for target domain
 grep "@target.com" leaked_combo.txt | cut -d: -f2 | sort -u > leaked_passwords.txt
@@ -256,11 +252,11 @@ for i in $(seq 1 254); do
 done
 
 # ASN enumeration — find all IPs owned by the org
-whois -h whois.radb.net -- "-i origin AS12345" | grep -oP '\d+\.\d+\.\d+\.\d+/\d+'
+whois -h whois.radb.net -- "-i origin AS12345" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+'
 
 # Virtual host discovery on shared IP
 ffuf -u "http://TARGET_IP/" -H "Host: FUZZ.target.com" \
-  -w /usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt \
+  -w ~/tools/SecLists/Discovery/DNS/subdomains-top1million-5000.txt \
   -fs BASELINE_SIZE -t 40
 
 # SPF/DMARC misconfig → email spoofing
@@ -278,7 +274,7 @@ dig +short TXT _dmarc.target.com
 ```bash
 # Find old endpoints no longer in robots.txt or sitemap
 curl -s "https://web.archive.org/cdx/search/cdx?url=*.target.com/*&output=text&fl=original&collapse=urlkey&limit=10000" \
-  | grep -v '\.(png|jpg|gif|css|ico)$' \
+  | grep -vE '\.(png|jpg|gif|css|ico)$' \
   | sort -u > wayback_urls.txt
 
 # Find old JS files (may contain deprecated endpoints/keys)

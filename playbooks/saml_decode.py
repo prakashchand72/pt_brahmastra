@@ -5,8 +5,9 @@ saml_decode.py — Decode a SAML AuthnRequest/Response from an ADFS/HTTP-Redirec
 Purpose:
     When a Service Provider (SP) redirects the browser to the IdP (e.g. ADFS),
     it passes a `SAMLRequest` query parameter that is:
-        1. base64url-encoded, AND
-        2. DEFLATE-compressed (raw DEFLATE, zlib with -MAX_WBITS = -15)
+        1. DEFLATE-compressed (raw DEFLATE, zlib with -MAX_WBITS = -15),
+        2. encoded with STANDARD base64 (not base64url), AND
+        3. URL-encoded (%-encoded) for transport in the query string
     This script reverses that so you can read the SP's SAML metadata
     (AssertionConsumerServiceURL, Issuer, Destination, NameIDPolicy, etc.).
 
@@ -22,6 +23,7 @@ Example:
 """
 import sys
 import base64
+import binascii
 import zlib
 import urllib.parse
 import re
@@ -30,10 +32,17 @@ import re
 def decode_saml(b64_value: str) -> str:
     # 1. URL-decode (SAMLRequest may be %-encoded inside the Location header)
     val = urllib.parse.unquote(b64_value.strip())
-    # 2. base64url -> raw bytes (tolerate missing padding / url-safe alphabet)
+    val = re.sub(r'\s+', '', val)  # tolerate pasted line breaks
+    # 2. base64 -> raw bytes (SAML uses standard base64; tolerate url-safe
+    #    alphabet and missing padding anyway)
     val = val.replace('-', '+').replace('_', '/')
     val += '=' * (-len(val) % 4)
-    raw = base64.b64decode(val)
+    try:
+        raw = base64.b64decode(val, validate=True)
+    except binascii.Error:
+        print("[!] Input is not valid base64 — paste the raw SAMLRequest/SAMLResponse value",
+              file=sys.stderr)
+        sys.exit(1)
     # 3. DEFLATE decompress: try raw deflate (wbits=-15) then zlib (wbits=15)
     for wbits in (-15, 15):
         try:
@@ -48,9 +57,9 @@ def main():
     if len(sys.argv) > 1 and sys.argv[1] == '--from-location-header':
         # Read a raw `curl -D -` header dump from stdin and pull the SAMLRequest
         data = sys.stdin.read()
-        m = re.search(r'[?&]SAMLRequest=([^&\s"]+)', data, re.I)
+        m = re.search(r'[?&]SAML(?:Request|Response)=([^&\s"]+)', data, re.I)
         if not m:
-            print("[!] SAMLRequest not found in input", file=sys.stderr)
+            print("[!] SAMLRequest/SAMLResponse not found in input", file=sys.stderr)
             sys.exit(1)
         value = m.group(1)
     elif len(sys.argv) > 1:

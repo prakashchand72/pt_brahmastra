@@ -234,6 +234,10 @@ lacks a needed feature or the tool has no MCP wrapper.
 - **Validate-before-report gate (Phase 6b):** orchestrator re-verifies every claimed
   finding before it reaches the report. Worker PoC → orchestrator re-check → report.
 - **State:** maintain `pentest/run-state.json` so engagement is resumable.
+- **Fresh-scope watcher (cron, outside engagements):** `playbooks/program-watch.sh`
+  diffs watched program policy pages and alerts on new/changed assets. On a change
+  alert: launch Phases 1–3 on the new assets immediately — the first 48 hours on
+  fresh scope carry the highest find probability.
 - **Handoff:** confirmed findings → `office_report` → `vajra_report`. Each PoC is
   structured for `office_recheck` retesting.
 - **Exploit isolation:** run exploit payloads on Kali (`shared_kali`) when possible.
@@ -263,18 +267,41 @@ lacks a needed feature or the tool has no MCP wrapper.
 ```bash
 TARGET="target.com"
 
-# 1. Triple subdomain enumeration
+# 1. Subdomain enumeration — PASSIVE + ACTIVE, dead or live. The user wants
+#    EVERY possible subdomain, not just live hosts. Passive sources alone often
+#    return only apex+www on small targets; active brute-force is what surfaces
+#    the real attack surface. Do BOTH, merge, then resolve.
+#
+#    Passive sources (triple coverage):
 subfinder -d "$TARGET" -all -o pentest/subs_subfinder.txt
 amass enum -passive -d "$TARGET" -o pentest/subs_amass.txt
-# crt.sh certificate transparency
+# crt.sh certificate transparency (may 502/rate-limit — fall back to
+# certspotter, hackertarget, rapiddns, threatcrowd; never trust one CT source)
 curl -s "https://crt.sh/?q=%25.$TARGET&output=json" | jq -r '.[].name_value' \
   | tr '[:upper:]' '[:lower:]' | sort -u > pentest/subs_crtsh.txt
-# Merge and dedup
+curl -sk "https://api.certspotter.com/v1/issuances?domain=$TARGET&include_subdomains=true&expand=dns_names" \
+  | jq -r '.[].dns_names[]' 2>/dev/null | tr '[:upper:]' '[:lower:]' | sort -u > pentest/subs_certspotter.txt
+curl -sk "https://api.hackertarget.com/hostsearch/?q=$TARGET" 2>/dev/null | cut -d, -f1 \
+  | sort -u > pentest/subs_hackertarget.txt
+#
+#    ACTIVE brute-force (the coverage passive misses). dnsx REQUIRES the -w
+#    flag when -d is given — piping a wordlist on stdin alone errors
+#    "[FTL] missing wordlist(w) flag required with domain(d) input".
+#    Run the big lists in the background (2M+ names takes minutes); output is
+#    buffered until completion, so poll the process, don't expect partials.
+cat ~/tools/SecLists/Discovery/DNS/subdomains-top1million-20000.txt \
+    ~/tools/SecLists/Discovery/DNS/deepmagic.com-prefixes-top50000.txt \
+    ~/tools/SecLists/Discovery/DNS/bitquark-subdomains-top100000.txt \
+    ~/tools/SecLists/Discovery/DNS/dns-Jhaddix.txt 2>/dev/null | sort -u > pentest/brute_wordlist.txt
+cat pentest/brute_wordlist.txt | dnsx -d "$TARGET" -w pentest/brute_wordlist.txt -silent -a -t 100 \
+  | awk '{print $1}' | sort -u > pentest/subs_brute.txt
+#
+# Merge and dedup (passive + active)
 cat pentest/subs_*.txt | anew > pentest/all_subs.txt
 
 # 2. Resolve all subdomains (use dnsx, not httpx — we want IPs for direct-to-IP scans)
 dnsx -l pentest/all_subs.txt -a -aaaa -cname -resp -o pentest/dns_resolved.txt
-cat pentest/all_subs.txt | httprobe -c 50 -t 3000 > pentest/live_hosts.txt
+cat pentest/all_subs.txt | httpx -silent -threads 50 -timeout 3 -o pentest/live_hosts.txt
 
 # 3. Triple archive URL discovery
 waybackurls "$TARGET" | anew pentest/urls_wayback.txt
@@ -287,8 +314,29 @@ httpx -l pentest/live_hosts.txt -title -tech-detect -status-code -ip \
   -web-server -csp-probe -o pentest/httpx_tech.txt
 
 # 5. Subdomain takeover check (Phase 2 — don't wait)
+#    CRITICAL: run this on ALL subdomains, INCLUDING dead/unresolved ones.
+#    A dead subdomain (no live host, dangling CNAME, dead A record) is the
+#    prime takeover candidate — do NOT skip it just because it doesn't resolve
+#    to a live web host. subjack/dnsreaper fingerprint the CNAME target, not
+#    the subdomain itself, so dead subs are exactly what they catch.
 subjack -w pentest/all_subs.txt -t 100 -timeout 10 \
   -o pentest/subjack_results.txt -ssl -c ~/tools/go/src/github.com/haccer/subjack/fingerprints.json
+# Wider fingerprint set for dead/dangling CNAMEs:
+dnsreaper -file pentest/all_subs.txt -out pentest/dnsreaper_results.txt 2>/dev/null || true
+# Explicit dead-subdomain sweep: CNAME to a dead target (curl 000) OR to a
+# known claimable service returning a live 404 (GitHub Pages, Heroku, Netlify…)
+# is a takeover candidate. subjack/dnsreaper above are the primary detectors;
+# this loop is the manual backstop.
+for SUB in $(cat pentest/all_subs.txt); do
+  CNAME=$(dig +short CNAME "$SUB" 2>/dev/null | head -1)
+  if [ -n "$CNAME" ]; then
+    CODE=$(curl -sk -o /dev/null -w "%{http_code}" "http://$CNAME" --max-time 10)
+    case "$CODE" in
+      000) echo "POTENTIAL TAKEOVER: $SUB -> $CNAME (dead)" >> pentest/takeover_candidates.txt ;;
+      404) echo "CHECK SERVICE: $SUB -> $CNAME (live 404 — verify against claimable-service fingerprints)" >> pentest/takeover_candidates.txt ;;
+    esac
+  fi
+done
 
 # 6. Quick port scan for top targets (naabu for speed)
 naabu -l pentest/live_hosts.txt -top-ports 1000 -rate 3000 -o pentest/naabu_quick.txt
@@ -304,7 +352,10 @@ for word in $(echo "$TARGET" | tr '.' ' '); do
   for fmt in "https://${word}.s3.amazonaws.com" "https://storage.googleapis.com/${word}" \
              "https://${word}.blob.core.windows.net" "https://${word}-backups.s3.amazonaws.com"; do
     code=$(curl -sk -o /dev/null -w "%{http_code}" "$fmt")
-    [ "$code" != "404" ] && echo "[cloud] $code $fmt" >> pentest/cloud_exposure.txt
+    # 200 = open/listable, 403 = exists but locked (still reportable info); ignore 404/301 noise
+    case "$code" in
+      200|403) echo "[cloud] $code $fmt" >> pentest/cloud_exposure.txt ;;
+    esac
   done
 done
 # CDN-bypass origin discovery: historical DNS + direct-IP Host header probing
@@ -312,8 +363,8 @@ done
 # curl -sk https://ORIGIN_IP/ -H "Host: $TARGET" --resolve "$TARGET:443:ORIGIN_IP"
 
 # 9. Screenshot triage gallery — visual triage + instant PoC evidence (gowitness installed)
-gowitness scan file -f pentest/live_hosts.txt --no-httpx -o pentest/screenshots
-gowitness report server &   # browse gallery at http://localhost:7272
+gowitness scan file -f pentest/live_hosts.txt --screenshot-path pentest/screenshots
+gowitness report server &   # browse gallery at http://localhost:7171
 ```
 
 ---
@@ -556,7 +607,7 @@ curl -sk -X POST "http://$IP/upload" -H "Host: $HOST" \
 
 **7. Race condition / TOCTOU (Bash)**
 ```bash
-python3 pentest/playbooks/race-condition.py
+python3 playbooks/race-condition.py
 ```
 
 **8. Server-side attacks (Bash)**
@@ -607,6 +658,23 @@ Targets exposing AI chat/summarize/agent endpoints get a dedicated pass:
 - CBC bit-flipping to change role/ID claims; IV manipulation on first block
 - JWT `kid` path traversal / SQLi, `jku`/`x5u` header key-injection, RS256→HS256 confusion
 - Hash length-extension where `?token=md5(secret||params)` patterns are visible
+
+**13. Modern attack classes (2025–26)** — run `references/modern-checklist.md` alongside
+the classic classes: framework auth bypass (Next.js middleware header, React RSC version
+checks), full BOLA/verb matrix, OAuth PKCE downgrade + passkey fallback, SSRF with
+IMDSv2/DNS-rebinding/webhook fields, cache deception via path normalization, postMessage
+and DOM-clobbering client-side chains, WebSocket per-message authorization, AI-agent
+tool-call abuse, and rate-limit bypass verification before declaring auth "not vulnerable".
+
+**14. Flow-based testing (the highest-value phase)** — after endpoint testing, load
+`references/flow-based-testing.md`: map user journeys per role, capture per-role HARs,
+attack every state *transition* (skip/reorder/race/cross-role replay), and hit the
+high-yield chains (checkout math, refund abuse, invite→role escalation, 2FA enrollment
+gap, object-lifecycle IDOR). Scanners find endpoint bugs; this finds the paid ones.
+
+**15. Custom exploit synthesis** — when canned payloads don't fit, synthesize a minimal
+PoC per `references/exploit-synthesis.md`: stdlib-first, single-command, self-printing
+evidence, non-destructive, packaged into `pentest/poc/` before Phase 6b.
 
 ---
 
@@ -697,6 +765,9 @@ retests — updating the tracker is its primary mutation.
 | `references/deep-eye-integration.md` | All phases — Deep Eye AI engine: install, config, CLI, check catalog, compliance, diff/retest |
 | `references/obsidian-tracker.md` | Phase 7 — Obsidian dashboard + per-finding tracker |
 | `references/auth-surface-saml-waf.md` | Phases 2–4 — auth-surface (login/reg/admin) sweep, SAML AuthnRequest decode, Airlock WAF fingerprint & block-vs-maintenance, SPA auth-flow enumeration |
+| `references/modern-checklist.md` | Phases 4–6 — 2025–26 attack classes: framework auth bypass (Next.js middleware, React RSC), full BOLA matrix, passkey/OAuth-PKCE attacks, SSRF 2026 (IMDSv2, rebinding, webhooks), cache deception, supply-chain/DOM-clobbering/postMessage, WebSocket per-message authz, AI-agent tool abuse, rate-limit bypass verification |
+| `references/flow-based-testing.md` | Phase 5 — user-journey testing: attack state transitions (skip/reorder/race/cross-role replay), checkout math, invite/role escalation, 2FA enrollment gaps, object-lifecycle IDOR. Playwright-driven, HAR-diffed per role |
+| `references/exploit-synthesis.md` | Phases 5–6 — custom minimal PoC synthesis per finding class (SQLi extractor, BOLA diff, SSRF OOB, JWT forge, race ledger, auth chains) + evidence packaging rules |
 
 ## Playbooks
 
@@ -706,10 +777,14 @@ retests — updating the tracker is its primary mutation.
 | `playbooks/no-lockout-check.py` | Rate-limiting detection |
 | `playbooks/race-condition.py` | Parallel request race condition tester |
 | `playbooks/build-wordlist.sh` | Target credential wordlist generator |
-| `playbooks/saml_decode.py` | Decode SAML AuthnRequest/Response (base64url + raw DEFLATE) from an SP→IdP redirect |
+| `playbooks/saml_decode.py` | Decode SAML AuthnRequest/Response (standard base64 + URL-encoded raw DEFLATE) from an SP→IdP redirect |
+| `playbooks/program-watch.sh` | Cron-able scope watcher — diffs program policy pages, alerts on new/changed assets (first-48h advantage) |
 
 ## Operational Notes
 
+- **This host runs macOS (BSD userland):** `grep -P`/`grep -oP` do not exist — use
+  `grep -E`/`grep -oE`. SecLists lives at `~/tools/SecLists`, never `/usr/share/seclists`.
+  curl rejects URLs with raw spaces (encode as `+`/`%20`) and needs `-g` for `[]` in URLs.
 - **IP bypass WAF:** CDN hostname → send requests directly to origin IP with `Host:` header
 - **404 fingerprinting:** equal response size to known-good 404 = WAF block, not a finding
 - **Timing attacks:** report only >200ms timing differences unless the framework is known non-constant-time
@@ -719,3 +794,8 @@ retests — updating the tracker is its primary mutation.
 - **GraphQL:** always send `{__schema{types{name,fields{name}}}}` introspection query
 - **CORS:** test with `Origin: null`, `Origin: https://evil.com`, `Origin: https://target.com.evil.com`
 - **Cache poisoning:** test unkeyed headers: X-Forwarded-Host, X-Forwarded-Scheme, X-Forwarded-Port, X-Original-URL
+- **PoC delivery = one short curl line.** Precompute the base64/encoded payload yourself
+  and hand the user a single paste-and-run `curl` command. Do NOT give multi-step
+  scripts (host DTD → build payload → POST) or long heredocs; the user pastes into a
+  terminal and a long command is hard to paste. Bake the collaborator URL in up front
+  rather than leaving a placeholder to substitute.

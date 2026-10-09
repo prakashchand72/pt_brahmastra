@@ -17,7 +17,7 @@ a live PoC on the current engagement.
 | Embeddings | ONNX all-MiniLM-L6-v2 (384-dim, fully local, cached at `~/.cache/chroma/onnx_models/`) |
 | Runtime | `/Users/prakkash/rag-venv/bin/python` (Python 3.12) |
 | Ingestion | `/Users/prakkash/.tracker-rag/ingest.py` |
-| Index contents | `findings` collection (3825 chunks, per `#C/H/M/L/I-XX` block) + `reports` collection (2151 overviews) |
+| Index contents | `findings` collection (3825 chunks at last count, per `#C/H/M/L/I-XX` block) + `reports` collection (2151 overviews at last count) — both are point-in-time snapshots that grow with each reindex |
 
 ## How to use (MCP tools)
 
@@ -48,7 +48,7 @@ print(r['documents'][0])"
 
 ## Notes / gotchas
 
-- `mcp` package must stay at 1.x (`pip install "mcp==1.29.0"`) — 2.0 removed FastMCP.
+- Pin `mcp` to 1.x (`pip install "mcp==1.29.0"`) — verified working; re-check compatibility before upgrading to 2.x.
 - Client reports are sensitive: the store is fully local, never ship it anywhere.
-- Only ~570/2151 reports carry parsed technology lists (the rest are scaffolds) — that's expected; tech lookup improves as real reports accumulate.
+- Only ~570/2151 reports carried parsed technology lists at last count (the rest are scaffolds) — that's expected; tech lookup improves as real reports accumulate.
 - Re-index is fingerprint-based (sha256) so it's cheap and idempotent.

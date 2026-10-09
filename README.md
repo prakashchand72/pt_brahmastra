@@ -78,11 +78,16 @@ references/
   dynamic-testing.md              ← D1–D8 parallel automated tool phases
   autonomous-orchestration.md     ← self-driving loop, agent fan-out, validation gate
   report-templates.md             ← report structure and severity table
+  modern-checklist.md             ← 2025–26 attack classes (framework bypass, BOLA matrix, SSRF 2026, cache deception, supply-chain, AI-agent)
+  flow-based-testing.md           ← user-journey attacks: state transitions, checkout math, role escalation
+  exploit-synthesis.md            ← custom minimal PoC templates + evidence packaging
 playbooks/
-  injection-fuzzer.py             ← 13-payload × N-field fuzzer with anomaly detection
-  no-lockout-check.py             ← lockout verification (N attempts, keyword detection)
-  race-condition.py               ← threading.Barrier synchronized parallel requests
+  injection-fuzzer.py             ← payload × field fuzzer with baseline-diffed anomaly detection
+  no-lockout-check.py             ← lockout verification (status-code + keyword aware)
+  race-condition.py               ← barrier-synchronized parallel requests
   build-wordlist.sh               ← brand/target-specific credential wordlist generator
+  saml_decode.py                  ← SAML AuthnRequest/Response decoder
+  program-watch.sh                ← cron-able bounty-program scope watcher (new-scope alerts)
 ```
 
 ## Requirements

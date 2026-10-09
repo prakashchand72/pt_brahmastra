@@ -142,7 +142,8 @@ These are the Deep Eye-native deep checks Brahmastra should adopt:
 ## AI pipeline (enable for bug-bounty depth)
 
 ```yaml
-payload_generation: { use_ai: true, context_aware: true, cve_database: true, custom_wordlists: true }
+vulnerability_scanner:
+  payload_generation: { use_ai: true, context_aware: true, cve_database: true, custom_wordlists: true }
 ai_planner:       { enabled: true, budget_seconds: 600, max_urls: 50, threads: 5 }
 ai_triage:        { enabled: true, drop_false_positives: true, drop_threshold: 0.8, min_severity: high }
 evidence_summary: { enabled: true, min_severity: high, max_findings: 15 }

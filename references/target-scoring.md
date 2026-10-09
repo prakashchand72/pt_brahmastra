@@ -46,7 +46,7 @@ curl -sk "http://TARGET/version.txt" | head -3
 curl -sk "http://TARGET/package.json" | python3 -c "import sys,json;d=json.load(sys.stdin);print(d.get('version',''))" 2>/dev/null
 
 # JavaScript build artifacts (often expose framework + version)
-curl -sk "http://TARGET/" | grep -oP '(src|href)="[^"]*\.(js|css)[^"]*"' \
+curl -sk "http://TARGET/" | grep -oE '(src|href)="[^"]*\.(js|css)[^"]*"' \
   | sed 's/.*"\(.*\)".*/\1/' | head -10
 ```
 
@@ -58,8 +58,14 @@ curl -sk "http://TARGET/" | grep -oP '(src|href)="[^"]*\.(js|css)[^"]*"' \
 /sitemap.xml             # full URL inventory
 /.well-known/security.txt  # VDP/bug bounty scope
 /humans.txt
-/crossdomain.xml
-/clientaccesspolicy.xml
+/crossdomain.xml          # legacy (Flash/Silverlight era) — low signal, note only
+/clientaccesspolicy.xml   # legacy (Silverlight) — low signal, note only
+
+# High-value leaks (check on every target)
+/.git/HEAD               # exposed git repo → git-dumper
+/swagger.json            # API schema
+/openapi.json            # API schema
+/api-docs                # API schema
 
 # Config / secrets
 /.env
@@ -138,7 +144,7 @@ done
 
 # Security headers
 curl -sI "http://$IP/" -H "Host: $HOST" \
-  | grep -iE 'x-frame|csp|hsts|x-content-type'
+  | grep -iE 'x-frame-options|content-security-policy|strict-transport-security|x-content-type-options'
 
 # Cookie flags on login
 curl -sI "http://$IP/login" -H "Host: $HOST" | grep -i 'set-cookie'
@@ -169,7 +175,7 @@ for P in /login /admin /signin /dashboard /manager /portal /staff /internal /aut
 done
 
 # 3. Interesting files
-for F in /robots.txt /.env /package.json /crossdomain.xml /.well-known/security.txt; do
+for F in /robots.txt /.env /package.json /.git/HEAD /swagger.json /openapi.json /api-docs /crossdomain.xml /.well-known/security.txt; do
   C=$(curl -sk -o /dev/null -w "%{http_code}" "http://$IP$F" -H "Host: $HOST")
   S=$(curl -sk -w "%{size_download}" -o /dev/null "http://$IP$F" -H "Host: $HOST")
   [ "$C" = "200" ] && [ "$S" -gt 10 ] && echo "  $F → $C (${S}B)"
@@ -184,7 +190,7 @@ done
 
 # 5. Cookie flags on any login
 curl -sI "http://$IP/login" -H "Host: $HOST" 2>/dev/null \
-  | grep -i 'set-cookie' | grep -iEv 'secure|samesite' | sed 's/^/  INSECURE COOKIE: /'
+  | grep -i 'set-cookie' | grep -iEv 'secure|httponly|samesite' | sed 's/^/  INSECURE COOKIE: /'
 
 # 6. WebDAV
 curl -sk -X OPTIONS "https://$HOST/" \
@@ -217,7 +223,7 @@ nuclei -tl | grep -i 'technology-name'
 nuclei -u "http://$IP" -H "Host: $HOST" -tags technology-name -severity high,critical
 
 # Snyk vulnerability DB
-curl -sk "https://security.snyk.io/vuln/npm:package-name" | grep -i 'severity\|cve'
+curl -sk "https://security.snyk.io/package/npm/<package-name>" | grep -i 'severity\|cve'
 ```
 
 ---

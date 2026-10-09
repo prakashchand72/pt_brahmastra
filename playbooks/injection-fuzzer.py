@@ -8,8 +8,10 @@ Configure TARGET, HOST, FIELDS, BASE_DATA below.
 """
 
 import urllib.request
+import urllib.error
 import urllib.parse
 import json
+import os
 import time
 
 # ── Configure these for each engagement ──────────────────────────────────────
@@ -60,15 +62,18 @@ ERROR_KEYWORDS = [
 def request(data):
     encoded = urllib.parse.urlencode(data).encode()
     req = urllib.request.Request(TARGET, data=encoded, headers=HEADERS)
-    start = time.time()
+    start = time.monotonic()
     try:
         r = urllib.request.urlopen(req, timeout=20)
         body = r.read().decode(errors="replace")
-        return len(body), body, time.time() - start, None
+        return len(body), body, time.monotonic() - start, None
     except urllib.error.HTTPError as e:
-        return 0, f"HTTP {e.code}", time.time() - start, e.code
+        # Read the error body — 500 pages often carry the SQL/stack error we want
+        body = e.read().decode(errors="replace")
+        return len(body), body, time.monotonic() - start, e.code
     except Exception as e:
-        return 0, str(e)[:80], time.time() - start, None
+        # Transport error — never keyword-scan this string, it is not a response
+        return 0, f"[transport error] {type(e).__name__}", time.monotonic() - start, "transport"
 
 
 def main():
@@ -77,9 +82,22 @@ def main():
     print(f"[*] Payloads: {len(PAYLOADS)}")
     print()
 
-    base_size, base_body, _, _ = request(BASE_DATA)
-    print(f"[baseline] size={base_size}B | {base_body[:60]}")
+    base_size, base_body, base_time, base_status = request(BASE_DATA)
+    if base_status == "transport":
+        print(f"[!] Baseline request failed (no response): {base_body[:120]}")
+        print("[!] Fix TARGET/HOST/BASE_DATA and re-run — results are meaningless without a baseline.")
+        return
+    print(f"[baseline] size={base_size}B | time={base_time:.2f}s | {base_body[:60]}")
     print()
+
+    # Keywords already present in the clean baseline are page boilerplate
+    # (e.g. "invalid"/"error" on a normal login form) — only flag NEW keywords.
+    baseline_keywords = {k for k in ERROR_KEYWORDS if k in base_body.lower()}
+    if baseline_keywords:
+        print(f"[baseline] ignoring keywords already in baseline: {sorted(baseline_keywords)}")
+
+    # Time anomaly is relative to baseline latency, not a fixed 3s
+    time_threshold = base_time * 3 + 1.0
 
     anomalies = []
 
@@ -89,28 +107,46 @@ def main():
             data[field] = payload
             size, body, elapsed, status = request(data)
 
+            if status == "transport":
+                print(f"[error]   field={field:<12} transport failure — {body}")
+                continue
+
+            lower = body.lower()
             is_anomaly = (
                 abs(size - base_size) > 50
-                or elapsed > 3.0
-                or any(k in body.lower() for k in ERROR_KEYWORDS)
+                or elapsed > time_threshold
+                or any(k in lower for k in ERROR_KEYWORDS if k not in baseline_keywords)
             )
+
+            # Reflection checks: SSTI evaluated ("{{7*7}}" → "49") and XSS reflected unencoded
+            reflected = ""
+            if payload in ("{{7*7}}", "${7*7}") and "49" in body and payload not in body:
+                reflected = "SSTI-evaluated?"
+                is_anomaly = True
+            elif payload == "<script>alert(1)</script>" and payload in body:
+                reflected = "XSS-reflected?"
+                is_anomaly = True
 
             tag = "[ANOMALY]" if is_anomaly else "[clean]  "
             print(f"{tag} field={field:<12} size={size:>6}B  time={elapsed:.2f}s  {body[:60]}")
 
             if is_anomaly:
-                print(f"           payload={payload!r}")
+                print(f"           payload={payload!r} {reflected}")
                 anomalies.append({
                     "field":   field,
                     "payload": payload,
                     "size":    size,
                     "elapsed": elapsed,
+                    "note":    reflected,
                     "body":    body[:300],
                 })
 
     print()
     print(f"[*] Done. {len(anomalies)} anomalies.")
 
+    out_dir = os.path.dirname(OUTPUT_FILE)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
     with open(OUTPUT_FILE, "w") as f:
         json.dump(anomalies, f, indent=2)
     print(f"[*] Saved to {OUTPUT_FILE}")

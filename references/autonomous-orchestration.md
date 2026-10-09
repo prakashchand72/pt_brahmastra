@@ -10,9 +10,9 @@ subscription — no external tool, no separate API key.
 - **Autonomy:** FULLY HANDS-OFF. After the authorization gate passes, run the entire
   chain end-to-end with no phase checkpoints. Do NOT stop to ask the user between
   phases or before exploitation. The user has explicitly opted into unattended runs.
-- **Parallelism:** MODERATE. Fan out to **3–4 concurrent subagents** at a time — never
-  more — to keep subscription token usage bounded. Queue remaining targets and refill
-  as agents complete.
+- **Parallelism:** MODERATE. Fan out to **up to 4 concurrent subagents** at a time —
+  never more — to keep subscription token usage bounded. Queue remaining targets and
+  refill as agents complete.
 
 ---
 
@@ -70,6 +70,7 @@ Phase 1  Authorization gate ──────── (human confirm, once)
 Phase 2  Passive recon ───────────── single agent, populate scope + live hosts
    │
 Phase 3  Prioritization ──────────── score → targets_ranked, write interestingtarget.txt
+                                      (scoring matrix: references/target-scoring.md)
    │
    ▼
 ┌─ AUTONOMOUS FAN-OUT (Phases 4–6 per target) ───────────────────────┐
@@ -97,7 +98,7 @@ it plans, dispatches, merges, and gates. Subagents do the grinding.
 
 ## Subagent dispatch template
 
-Spawn with the `Agent` tool, `subagent_type: general-purpose`, 3–4 at a time.
+Spawn with the `Agent` tool, `subagent_type: general-purpose`, up to 4 at a time.
 Each subagent is a self-contained Brahmastra worker for ONE target.
 
 ```
@@ -140,6 +141,11 @@ Before writing the report, the orchestrator independently re-runs each
 - PoC no longer reproduces → move to `findings_rejected` with reason.
 - Requires an external precondition → mark CONDITIONAL, document the precondition.
 
+**ID scheme:** F-XX (F-01, F-02, …) is the single canonical final finding ID across
+the engagement. The per-severity C/H/M/L-XX prefixes that appear in tracker notes
+(e.g. C-01, H-03) are severity slug prefixes for sorting, NOT finding IDs — always
+cross-reference findings by their F-XX ID.
+
 This double-validation (worker + orchestrator) is what keeps the false-positive rate
 near zero and makes every reported finding safe to hand a client.
 
@@ -159,8 +165,7 @@ Autonomous Mode does not replace the report/retest tooling — it feeds it:
 
 ## Cost / usage note
 
-Moderate fan-out means 3–4 subagents live at once; each consumes subscription tokens
+Moderate fan-out means up to 4 subagents live at once; each consumes subscription tokens
 independently. On very wide scopes (dozens of hosts) the queue keeps concurrency
 capped at 4, but total usage still scales with target count. For a large range,
 prioritize hard in Phase 3 and cap the number of targets that enter fan-out.
-```

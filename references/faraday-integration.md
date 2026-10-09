@@ -38,12 +38,14 @@ Note: `brew`/`pg`/`redis` binaries are at `/opt/homebrew/bin` — already on PAT
 # 1. One workspace per client
 faraday-cli workspace create "<client>-<YYYYMM>"
 
-# 2. Scope CLI to that workspace
-faraday-cli -w "<client>-<YYYYMM>"
+# 2. Scope CLI to that workspace (persistent selection)
+faraday-cli workspace select "<client>-<YYYYMM>"
 
-# 3. Push live tool output (console plugin parses stdout)
-faraday-cli tool run "nmap -sV -sC <target>"
-faraday-cli tool run "nuclei -u <target> -severity critical,high,medium,low,info"
+# 3. Push live tool output — console plugins need STRUCTURED output to parse
+#    reliably, so always export (-oX / -json) and prefer `tool report` on the file
+faraday-cli tool run "nmap -sV -sC -oX pentest/HOST/nmap.xml <target>"
+faraday-cli tool report -w "<client>-<YYYYMM>" pentest/HOST/nmap.xml
+faraday-cli tool run "nuclei -u <target> -severity critical,high,medium,low,info -json-export pentest/HOST/nuclei_results.json"
 
 # 4. Import artifacts already on disk (report plugin parses XML/JSON)
 faraday-cli tool report pentest/HOST/nuclei_results.json
@@ -51,7 +53,7 @@ faraday-cli tool report pentest/HOST/ferox.json
 
 # 5. Verify ingestion
 faraday-cli workspace list
-faraday-cli -w "<client>-<YYYYMM>" vuln list
+faraday-cli vuln list -w "<client>-<YYYYMM>"
 ```
 
 ## Troubleshooting

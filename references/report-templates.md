@@ -34,7 +34,7 @@ Every finding below was actively tested. Status reflects live results.
 
 ## Per-Finding Template
 
-```markdown
+````markdown
 ## F-XX — [Finding Title]
 
 | | |
@@ -72,13 +72,13 @@ curl -sk "http://IP/path" -H "Host: HOSTNAME" \
 - [Specific actionable fix, not "improve security"]
 - [Configuration change with exact setting]
 - [Framework/library version to upgrade to]
-```
+````
 
 ---
 
 ## Attack Chain Template
 
-```markdown
+````markdown
 ### Chain [Letter] — [Chain Name]
 
 ```
@@ -88,7 +88,7 @@ F-YY  [finding title]          [action verb]
       ↓
 Result: [outcome — RCE / credential theft / data exposure / bypass]
 ```
-```
+````
 
 ---
 
@@ -100,7 +100,7 @@ Result: [outcome — RCE / credential theft / data exposure / bypass]
 | High | 7.0–8.9 | Auth bypass, authenticated RCE, significant data exposure | No lockout → brute-force → admin |
 | Medium | 4.0–6.9 | User interaction required, partial data exposure, chaining required | Open redirect (JS), XSS stored |
 | Low | 1.0–3.9 | Defense-in-depth, info only, hard to exploit | Missing security headers, version disclosure |
-| Info | 0.1–0.9 | Best practice, no direct risk | Server banner, outdated minor version |
+| Info | 0.0 (None) | Best practice, no direct risk | Server banner, outdated minor version |
 
 ---
 
@@ -114,11 +114,11 @@ Result: [outcome — RCE / credential theft / data exposure / bypass]
 | SQL Injection | SQLmap all techniques + manual SLEEP() × N fields | ❌ Not vulnerable |
 | Stored/Reflected XSS | dalfox automated + manual | ❌ Not vulnerable |
 | Credential brute-force | top-5000 rockyou + N-entry target wordlist | ❌ No valid credentials |
-| Timing attack | 5 samples/username, bcrypt constant-time | ❌ Not viable |
+| Timing attack (username enum) | hundreds+ samples per username needed; classic oracle is bcrypt running ONLY for valid usernames — constant-time compare on both paths kills it | ❌ Not viable |
 | CORS misconfiguration | Origin: evil.com injection | ❌ Not misconfigured |
 | HTTP Request Smuggling | CL-TE probe | ❌ Not confirmed |
-| SSRF | X-Forwarded-Host injection | ❌ Rejected |
+| Host-header poisoning | X-Forwarded-Host injection | ❌ Rejected |
 | Username enumeration | Valid vs invalid — same response | ❌ FALSE POSITIVE |
-| Account lockout | 50 rapid attempts | ❌ NO LOCKOUT (confirms F-XX) |
+| Account lockout | 50 rapid attempts | ✅ VULNERABLE — no lockout (confirms F-XX) |
 | Nuclei CVE scan | tags: cve,rce,sqli,xss,ssrf,exposure,misconfig | 0 findings |
 ```

